@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import yt_dlp
-import uvicorn
+import tempfile
+import os
 
 app = FastAPI()
 
@@ -14,12 +15,31 @@ def health():
 
 @app.post("/info")
 def get_video_info(req: VideoRequest):
-    ydl_opts = {"quiet": True, "no_warnings": True}
+    
+    # Écrire les cookies dans un fichier temporaire si disponible
+    cookies_file = None
+    cookies_content = os.environ.get("YOUTUBE_COOKIES", "")
+    
+    if cookies_content:
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        tmp.write(cookies_content)
+        tmp.close()
+        cookies_file = tmp.name
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+    }
+    
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
             formats = []
             seen = set()
+
             for f in info.get("formats", []):
                 quality = f.get("format_note") or f.get("height") or "unknown"
                 label = f"{quality}p" if isinstance(quality, int) else str(quality)
@@ -40,11 +60,18 @@ def get_video_info(req: VideoRequest):
                     "hasAudio": has_audio,
                     "url": url,
                 })
-            formats = sorted(formats, key=lambda x: (x["hasVideo"], x["hasAudio"]), reverse=True)[:6]
+
+            formats = sorted(
+                formats,
+                key=lambda x: (x["hasVideo"], x["hasAudio"]),
+                reverse=True
+            )[:6]
+
             thumbnail = info.get("thumbnail", "")
             if not thumbnail and "youtube" in req.url:
                 vid_id = info.get("id", "")
                 thumbnail = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
+
             return {
                 "success": True,
                 "title": info.get("title", "Video"),
@@ -55,6 +82,6 @@ def get_video_info(req: VideoRequest):
             }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    finally:
+        if cookies_file and os.path.exists(cookies_file):
+            os.unlink(cookies_file)
