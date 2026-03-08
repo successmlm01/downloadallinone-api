@@ -24,7 +24,12 @@ def get_video_info(req: VideoRequest):
         tmp.close()
         cookies_file = tmp.name
 
-    ydl_opts = {"quiet": True, "no_warnings": True}
+    # On extrait juste les infos sans forcer un format spécifique
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
 
@@ -32,51 +37,76 @@ def get_video_info(req: VideoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
 
-            # Formats combinés vidéo+audio (prêts à lire)
-            combined = []
-            for f in info.get("formats", []):
+            all_formats = info.get("formats", [])
+            formats = []
+            seen_heights = set()
+
+            # 1. Formats vidéo avec audio intégré (rare sur YouTube mais possible)
+            for f in sorted(all_formats, key=lambda x: x.get("height") or 0, reverse=True):
                 has_video = f.get("vcodec", "none") != "none"
                 has_audio = f.get("acodec", "none") != "none"
-                url = f.get("url", "")
                 height = f.get("height")
+                url = f.get("url", "")
                 ext = f.get("ext", "mp4")
                 filesize = f.get("filesize") or f.get("filesize_approx")
 
-                # Garder seulement les formats avec vidéo ET audio
-                if has_video and has_audio and url and height:
-                    combined.append({
+                if has_video and has_audio and url and height and height not in seen_heights:
+                    seen_heights.add(height)
+                    formats.append({
                         "quality": f"{height}p",
                         "format": ext.upper(),
                         "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
                         "hasVideo": True,
                         "hasAudio": True,
                         "url": url,
-                        "height": height,
                     })
 
-            # Trier par qualité décroissante et dédupliquer
-            seen = set()
-            formats = []
-            for f in sorted(combined, key=lambda x: x["height"], reverse=True):
-                key = f["quality"]
-                if key not in seen:
-                    seen.add(key)
-                    formats.append({k: v for k, v in f.items() if k != "height"})
+            # 2. Si pas assez de formats combinés, ajouter les vidéo-only
+            #    (le navigateur peut les lire directement via <video>)
+            seen_heights_vo = set()
+            for f in sorted(all_formats, key=lambda x: x.get("height") or 0, reverse=True):
+                has_video = f.get("vcodec", "none") != "none"
+                has_audio = f.get("acodec", "none") != "none"
+                height = f.get("height")
+                url = f.get("url", "")
+                ext = f.get("ext", "mp4")
+                filesize = f.get("filesize") or f.get("filesize_approx")
 
-            # Ajouter audio MP3 séparé
-            for f in info.get("formats", []):
-                if f.get("acodec", "none") != "none" and f.get("vcodec", "none") == "none":
+                if has_video and not has_audio and url and height and height not in seen_heights and height not in seen_heights_vo:
+                    seen_heights_vo.add(height)
                     formats.append({
-                        "quality": "Audio MP3",
-                        "format": "MP3",
-                        "size": None,
-                        "hasVideo": False,
-                        "hasAudio": True,
-                        "url": f.get("url", ""),
+                        "quality": f"{height}p",
+                        "format": ext.upper(),
+                        "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
+                        "hasVideo": True,
+                        "hasAudio": False,
+                        "url": url,
                     })
+
+                if len(formats) >= 5:
                     break
 
-            # Limiter à 6 formats
+            # 3. Meilleur audio seul
+            best_audio = None
+            best_abr = 0
+            for f in all_formats:
+                has_video = f.get("vcodec", "none") != "none"
+                has_audio = f.get("acodec", "none") != "none"
+                abr = f.get("abr") or 0
+                if has_audio and not has_video and abr > best_abr:
+                    best_abr = abr
+                    best_audio = f
+
+            if best_audio:
+                formats.append({
+                    "quality": "Audio MP3",
+                    "format": "MP3",
+                    "size": None,
+                    "hasVideo": False,
+                    "hasAudio": True,
+                    "url": best_audio.get("url", ""),
+                })
+
             formats = formats[:6]
 
             thumbnail = info.get("thumbnail", "")
