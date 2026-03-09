@@ -25,7 +25,7 @@ def get_video_info(req: VideoRequest):
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "extractor_args": {"youtube": {"player_client": ["web"]}},
+        "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios"]}},
     }
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
@@ -34,6 +34,12 @@ def get_video_info(req: VideoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
             all_formats = info.get("formats", [])
+
+            # Debug: afficher tous les formats reçus
+            print("=== FORMATS REÇUS ===")
+            for f in all_formats:
+                print(f"height={f.get('height')} ext={f.get('ext')} has_v={f.get('vcodec','none')!='none'} has_a={f.get('acodec','none')!='none'}")
+
             best_by_height = {}
             for f in all_formats:
                 has_video = f.get("vcodec", "none") != "none"
@@ -54,6 +60,7 @@ def get_video_info(req: VideoRequest):
                         best_by_height[height] = f
                     elif ext == "mp4" and prev.get("ext") == "webm" and not (prev_has_audio and not has_audio):
                         best_by_height[height] = f
+
             labels = {2160:"4K",1440:"2K",1080:"1080p",720:"720p",480:"480p",360:"360p",240:"240p",144:"144p"}
             formats = []
             for height in sorted(best_by_height.keys(), reverse=True):
@@ -71,6 +78,7 @@ def get_video_info(req: VideoRequest):
                 })
                 if len(formats) == 6:
                     break
+
             best_audio = None
             best_abr = 0
             for f in all_formats:
@@ -81,9 +89,11 @@ def get_video_info(req: VideoRequest):
                         best_audio = f
             if best_audio:
                 formats.append({"quality":"Audio MP3","format":"MP3","size":None,"hasVideo":False,"hasAudio":True,"url":best_audio.get("url","")})
+
             thumbnail = info.get("thumbnail","")
             if not thumbnail and "youtube" in req.url:
                 thumbnail = f"https://img.youtube.com/vi/{info.get('id','')}/maxresdefault.jpg"
+
             return {"success":True,"title":info.get("title","Video"),"thumbnail":thumbnail,"duration":str(info.get("duration_string","N/A")),"author":info.get("uploader") or info.get("channel","Unknown"),"formats":formats}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
