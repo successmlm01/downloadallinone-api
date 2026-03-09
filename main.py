@@ -71,7 +71,7 @@ def get_video_info(req: VideoRequest):
                     height = f.get("height")
                     url = f.get("url", "")
                     ext = f.get("ext", "mp4")
-                    if has_video and height == target and url and ext == "mp4":
+                    if has_video and height == target and url and ext in ("mp4", "webm"):
                         filesize = f.get("filesize") or f.get("filesize_approx") or 0
                         if best is None or filesize > (best.get("filesize") or 0):
                             best = f
