@@ -24,7 +24,6 @@ def get_video_info(req: VideoRequest):
         tmp.close()
         cookies_file = tmp.name
 
-    # On extrait juste les infos sans forcer un format spécifique
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -36,12 +35,12 @@ def get_video_info(req: VideoRequest):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
-
             all_formats = info.get("formats", [])
+
             formats = []
             seen_heights = set()
 
-            # 1. Formats vidéo avec audio intégré (rare sur YouTube mais possible)
+            # Priorité 1 : formats vidéo+audio combinés
             for f in sorted(all_formats, key=lambda x: x.get("height") or 0, reverse=True):
                 has_video = f.get("vcodec", "none") != "none"
                 has_audio = f.get("acodec", "none") != "none"
@@ -61,32 +60,43 @@ def get_video_info(req: VideoRequest):
                         "url": url,
                     })
 
-            # 2. Si pas assez de formats combinés, ajouter les vidéo-only
-            #    (le navigateur peut les lire directement via <video>)
-            seen_heights_vo = set()
-            for f in sorted(all_formats, key=lambda x: x.get("height") or 0, reverse=True):
-                has_video = f.get("vcodec", "none") != "none"
-                has_audio = f.get("acodec", "none") != "none"
-                height = f.get("height")
-                url = f.get("url", "")
-                ext = f.get("ext", "mp4")
-                filesize = f.get("filesize") or f.get("filesize_approx")
-
-                if has_video and not has_audio and url and height and height not in seen_heights and height not in seen_heights_vo:
-                    seen_heights_vo.add(height)
+            # Priorité 2 : vidéo-only pour les résolutions manquantes
+            target_heights = [1080, 720, 480, 360, 240]
+            for target in target_heights:
+                if target in seen_heights:
+                    continue
+                best = None
+                for f in all_formats:
+                    has_video = f.get("vcodec", "none") != "none"
+                    height = f.get("height")
+                    url = f.get("url", "")
+                    ext = f.get("ext", "mp4")
+                    if has_video and height == target and url and ext == "mp4":
+                        filesize = f.get("filesize") or f.get("filesize_approx") or 0
+                        if best is None or filesize > (best.get("filesize") or 0):
+                            best = f
+                if best:
+                    filesize = best.get("filesize") or best.get("filesize_approx")
                     formats.append({
-                        "quality": f"{height}p",
-                        "format": ext.upper(),
+                        "quality": f"{target}p",
+                        "format": "MP4",
                         "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
                         "hasVideo": True,
                         "hasAudio": False,
-                        "url": url,
+                        "url": best.get("url", ""),
                     })
+                    seen_heights.add(target)
 
-                if len(formats) >= 5:
-                    break
+            # Trier par qualité décroissante
+            def sort_key(f):
+                try:
+                    return int(f["quality"].replace("p", ""))
+                except:
+                    return 0
 
-            # 3. Meilleur audio seul
+            formats = sorted(formats, key=sort_key, reverse=True)[:5]
+
+            # Meilleur audio seul
             best_audio = None
             best_abr = 0
             for f in all_formats:
@@ -106,8 +116,6 @@ def get_video_info(req: VideoRequest):
                     "hasAudio": True,
                     "url": best_audio.get("url", ""),
                 })
-
-            formats = formats[:6]
 
             thumbnail = info.get("thumbnail", "")
             if not thumbnail and "youtube" in req.url:
