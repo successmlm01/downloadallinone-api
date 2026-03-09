@@ -20,9 +20,16 @@ def get_video_info(req: VideoRequest):
         tmp.write(cookies_content)
         tmp.close()
         cookies_file = tmp.name
-    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extractor_args": {"youtube": {"player_client": ["web"]}},
+    }
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
