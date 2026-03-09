@@ -1,8 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import yt_dlp
-import tempfile
-import os
+import yt_dlp, tempfile, os
 
 app = FastAPI()
 
@@ -17,116 +15,69 @@ def health():
 def get_video_info(req: VideoRequest):
     cookies_file = None
     cookies_content = os.environ.get("YOUTUBE_COOKIES", "")
-
     if cookies_content:
         tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
         tmp.write(cookies_content)
         tmp.close()
         cookies_file = tmp.name
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
             all_formats = info.get("formats", [])
-
-            # Collecter le meilleur format pour chaque hauteur cible
-            target_heights = [2160, 1440, 1080, 720, 480, 360, 240, 144]
             best_by_height = {}
-
             for f in all_formats:
                 has_video = f.get("vcodec", "none") != "none"
                 height = f.get("height")
                 url = f.get("url", "")
                 ext = f.get("ext", "mp4")
-
                 if not has_video or not height or not url:
                     continue
                 if ext not in ("mp4", "webm"):
                     continue
-
                 has_audio = f.get("acodec", "none") != "none"
-                filesize = f.get("filesize") or f.get("filesize_approx") or 0
-
                 if height not in best_by_height:
                     best_by_height[height] = f
                 else:
                     prev = best_by_height[height]
                     prev_has_audio = prev.get("acodec", "none") != "none"
-                    prev_filesize = prev.get("filesize") or prev.get("filesize_approx") or 0
-                    # Préférer mp4 > webm, puis audio combiné, puis plus grande taille
-                    if (not prev_has_audio and has_audio):
+                    if not prev_has_audio and has_audio:
                         best_by_height[height] = f
                     elif ext == "mp4" and prev.get("ext") == "webm" and not (prev_has_audio and not has_audio):
                         best_by_height[height] = f
-                    elif filesize > prev_filesize and not (prev_has_audio and not has_audio):
-                        best_by_height[height] = f
-
-            # Construire la liste de formats triée
+            labels = {2160:"4K",1440:"2K",1080:"1080p",720:"720p",480:"480p",360:"360p",240:"240p",144:"144p"}
             formats = []
             for height in sorted(best_by_height.keys(), reverse=True):
                 f = best_by_height[height]
                 has_audio = f.get("acodec", "none") != "none"
                 ext = f.get("ext", "mp4")
                 filesize = f.get("filesize") or f.get("filesize_approx")
-
-                quality_labels = {2160: "4K", 1440: "2K", 1080: "1080p", 720: "720p", 480: "480p", 360: "360p", 240: "240p", 144: "144p"}
-                label = quality_labels.get(height, f"{height}p")
-
                 formats.append({
-                    "quality": label,
+                    "quality": labels.get(height, f"{height}p"),
                     "format": ext.upper(),
                     "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
                     "hasVideo": True,
                     "hasAudio": has_audio,
                     "url": f.get("url", ""),
                 })
-
-            # Limiter à 6 formats vidéo
-            formats = formats[:6]
-
-            # Meilleur audio seul
+                if len(formats) == 6:
+                    break
             best_audio = None
             best_abr = 0
             for f in all_formats:
-                has_video = f.get("vcodec", "none") != "none"
-                has_audio = f.get("acodec", "none") != "none"
-                abr = f.get("abr") or 0
-                if has_audio and not has_video and abr > best_abr:
-                    best_abr = abr
-                    best_audio = f
-
+                if f.get("vcodec","none") == "none" and f.get("acodec","none") != "none":
+                    abr = f.get("abr") or 0
+                    if abr > best_abr:
+                        best_abr = abr
+                        best_audio = f
             if best_audio:
-                formats.append({
-                    "quality": "Audio MP3",
-                    "format": "MP3",
-                    "size": None,
-                    "hasVideo": False,
-                    "hasAudio": True,
-                    "url": best_audio.get("url", ""),
-                })
-
-            thumbnail = info.get("thumbnail", "")
+                formats.append({"quality":"Audio MP3","format":"MP3","size":None,"hasVideo":False,"hasAudio":True,"url":best_audio.get("url","")})
+            thumbnail = info.get("thumbnail","")
             if not thumbnail and "youtube" in req.url:
-                vid_id = info.get("id", "")
-                thumbnail = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
-
-            return {
-                "success": True,
-                "title": info.get("title", "Video"),
-                "thumbnail": thumbnail,
-                "duration": str(info.get("duration_string", "N/A")),
-                "author": info.get("uploader") or info.get("channel", "Unknown"),
-                "formats": formats,
-            }
-
+                thumbnail = f"https://img.youtube.com/vi/{info.get('id','')}/maxresdefault.jpg"
+            return {"success":True,"title":info.get("title","Video"),"thumbnail":thumbnail,"duration":str(info.get("duration_string","N/A")),"author":info.get("uploader") or info.get("channel","Unknown"),"formats":formats}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
