@@ -37,64 +37,60 @@ def get_video_info(req: VideoRequest):
             info = ydl.extract_info(req.url, download=False)
             all_formats = info.get("formats", [])
 
-            formats = []
-            seen_heights = set()
+            # Collecter le meilleur format pour chaque hauteur cible
+            target_heights = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+            best_by_height = {}
 
-            # Priorité 1 : formats vidéo+audio combinés
-            for f in sorted(all_formats, key=lambda x: x.get("height") or 0, reverse=True):
+            for f in all_formats:
                 has_video = f.get("vcodec", "none") != "none"
-                has_audio = f.get("acodec", "none") != "none"
                 height = f.get("height")
                 url = f.get("url", "")
                 ext = f.get("ext", "mp4")
+
+                if not has_video or not height or not url:
+                    continue
+                if ext not in ("mp4", "webm"):
+                    continue
+
+                has_audio = f.get("acodec", "none") != "none"
+                filesize = f.get("filesize") or f.get("filesize_approx") or 0
+
+                if height not in best_by_height:
+                    best_by_height[height] = f
+                else:
+                    prev = best_by_height[height]
+                    prev_has_audio = prev.get("acodec", "none") != "none"
+                    prev_filesize = prev.get("filesize") or prev.get("filesize_approx") or 0
+                    # Préférer mp4 > webm, puis audio combiné, puis plus grande taille
+                    if (not prev_has_audio and has_audio):
+                        best_by_height[height] = f
+                    elif ext == "mp4" and prev.get("ext") == "webm" and not (prev_has_audio and not has_audio):
+                        best_by_height[height] = f
+                    elif filesize > prev_filesize and not (prev_has_audio and not has_audio):
+                        best_by_height[height] = f
+
+            # Construire la liste de formats triée
+            formats = []
+            for height in sorted(best_by_height.keys(), reverse=True):
+                f = best_by_height[height]
+                has_audio = f.get("acodec", "none") != "none"
+                ext = f.get("ext", "mp4")
                 filesize = f.get("filesize") or f.get("filesize_approx")
 
-                if has_video and has_audio and url and height and height not in seen_heights:
-                    seen_heights.add(height)
-                    formats.append({
-                        "quality": f"{height}p",
-                        "format": ext.upper(),
-                        "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
-                        "hasVideo": True,
-                        "hasAudio": True,
-                        "url": url,
-                    })
+                quality_labels = {2160: "4K", 1440: "2K", 1080: "1080p", 720: "720p", 480: "480p", 360: "360p", 240: "240p", 144: "144p"}
+                label = quality_labels.get(height, f"{height}p")
 
-            # Priorité 2 : vidéo-only pour les résolutions manquantes
-            target_heights = [1080, 720, 480, 360, 240]
-            for target in target_heights:
-                if target in seen_heights:
-                    continue
-                best = None
-                for f in all_formats:
-                    has_video = f.get("vcodec", "none") != "none"
-                    height = f.get("height")
-                    url = f.get("url", "")
-                    ext = f.get("ext", "mp4")
-                    if has_video and height == target and url and ext in ("mp4", "webm"):
-                        filesize = f.get("filesize") or f.get("filesize_approx") or 0
-                        if best is None or filesize > (best.get("filesize") or 0):
-                            best = f
-                if best:
-                    filesize = best.get("filesize") or best.get("filesize_approx")
-                    formats.append({
-                        "quality": f"{target}p",
-                        "format": "MP4",
-                        "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
-                        "hasVideo": True,
-                        "hasAudio": False,
-                        "url": best.get("url", ""),
-                    })
-                    seen_heights.add(target)
+                formats.append({
+                    "quality": label,
+                    "format": ext.upper(),
+                    "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
+                    "hasVideo": True,
+                    "hasAudio": has_audio,
+                    "url": f.get("url", ""),
+                })
 
-            # Trier par qualité décroissante
-            def sort_key(f):
-                try:
-                    return int(f["quality"].replace("p", ""))
-                except:
-                    return 0
-
-            formats = sorted(formats, key=sort_key, reverse=True)[:5]
+            # Limiter à 6 formats vidéo
+            formats = formats[:6]
 
             # Meilleur audio seul
             best_audio = None
