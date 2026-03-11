@@ -1,102 +1,129 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import yt_dlp, tempfile, os
+import httpx
+import re
+import os
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class VideoRequest(BaseModel):
     url: str
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://app.ytdown.to/en15/",
+    "Origin": "https://app.ytdown.to",
+}
+
+def extract_video_id(url: str) -> str:
+    patterns = [
+        r"(?:v=|youtu\.be/)([^&\n?#]+)",
+        r"(?:shorts/)([^&\n?#]+)",
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return ""
+
+async def get_ytcontent_url(video_id: str, quality: str, client: httpx.AsyncClient) -> dict:
+    # Construire l'URL ytcontent
+    import time
+    timestamp = int(time.time() * 1000)
+    ytcontent_url = f"https://s13.ytcontent.com/v5/video/{video_id}/{timestamp}/{quality}"
+
+    # Appel proxy.php pour initier la conversion
+    res = await client.post(
+        "https://app.ytdown.to/proxy.php",
+        data={"url": ytcontent_url},
+        headers=HEADERS,
+        timeout=30,
+    )
+    data = res.json()
+    api = data.get("api", {})
+
+    # Poll jusqu'à completion (max 30s)
+    for _ in range(15):
+        if api.get("status") == "completed" and api.get("fileUrl", "Waiting...") != "Waiting...":
+            return {
+                "fileUrl": api.get("fileUrl", ""),
+                "fileSize": api.get("fileSize", ""),
+                "fileName": api.get("fileName", ""),
+            }
+        import asyncio
+        await asyncio.sleep(2)
+        res2 = await client.post(
+            "https://app.ytdown.to/proxy.php",
+            data={"url": ytcontent_url},
+            headers=HEADERS,
+            timeout=30,
+        )
+        api = res2.json().get("api", {})
+
+    return {}
 
 @app.get("/")
 def health():
     return {"status": "ok", "service": "DownloadAllinOne API"}
 
 @app.post("/info")
-def get_video_info(req: VideoRequest):
-    cookies_file = None
-    cookies_content = os.environ.get("YOUTUBE_COOKIES", "")
-    if cookies_content:
-        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-        tmp.write(cookies_content)
-        tmp.close()
-        cookies_file = tmp.name
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios"]}},
-    }
-    if cookies_file:
-        ydl_opts["cookiefile"] = cookies_file
-
+async def get_video_info(req: VideoRequest):
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
-            all_formats = info.get("formats", [])
+        video_id = extract_video_id(req.url)
+        if not video_id:
+            raise HTTPException(status_code=400, detail="Invalid YouTube URL")
 
-            # Debug: afficher tous les formats reçus
-            print("=== FORMATS REÇUS ===")
-            for f in all_formats:
-                print(f"height={f.get('height')} ext={f.get('ext')} has_v={f.get('vcodec','none')!='none'} has_a={f.get('acodec','none')!='none'}")
+        async with httpx.AsyncClient(timeout=60) as client:
+            # 1. Check cooldown
+            await client.post(
+                "https://app.ytdown.to/cooldown.php",
+                data={"action": "check"},
+                headers=HEADERS,
+            )
 
-            best_by_height = {}
-            for f in all_formats:
-                has_video = f.get("vcodec", "none") != "none"
-                height = f.get("height")
-                url = f.get("url", "")
-                ext = f.get("ext", "mp4")
-                if not has_video or not height or not url:
-                    continue
-                if ext not in ("mp4", "webm"):
-                    continue
-                has_audio = f.get("acodec", "none") != "none"
-                if height not in best_by_height:
-                    best_by_height[height] = f
-                else:
-                    prev = best_by_height[height]
-                    prev_has_audio = prev.get("acodec", "none") != "none"
-                    if not prev_has_audio and has_audio:
-                        best_by_height[height] = f
-                    elif ext == "mp4" and prev.get("ext") == "webm" and not (prev_has_audio and not has_audio):
-                        best_by_height[height] = f
+            # 2. Get video info via oEmbed
+            oembed = await client.get(
+                f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+            )
+            oembed_data = oembed.json()
 
-            labels = {2160:"4K",1440:"2K",1080:"1080p",720:"720p",480:"480p",360:"360p",240:"240p",144:"144p"}
+            # 3. Get download URLs pour chaque qualité
+            qualities = ["1080p", "720p", "480p", "360p"]
             formats = []
-            for height in sorted(best_by_height.keys(), reverse=True):
-                f = best_by_height[height]
-                has_audio = f.get("acodec", "none") != "none"
-                ext = f.get("ext", "mp4")
-                filesize = f.get("filesize") or f.get("filesize_approx")
-                formats.append({
-                    "quality": labels.get(height, f"{height}p"),
-                    "format": ext.upper(),
-                    "size": f"~{round(filesize/1024/1024)}MB" if filesize else None,
-                    "hasVideo": True,
-                    "hasAudio": has_audio,
-                    "url": f.get("url", ""),
-                })
-                if len(formats) == 6:
-                    break
 
-            best_audio = None
-            best_abr = 0
-            for f in all_formats:
-                if f.get("vcodec","none") == "none" and f.get("acodec","none") != "none":
-                    abr = f.get("abr") or 0
-                    if abr > best_abr:
-                        best_abr = abr
-                        best_audio = f
-            if best_audio:
-                formats.append({"quality":"Audio MP3","format":"MP3","size":None,"hasVideo":False,"hasAudio":True,"url":best_audio.get("url","")})
+            for quality in qualities:
+                result = await get_ytcontent_url(video_id, quality, client)
+                if result.get("fileUrl"):
+                    formats.append({
+                        "quality": quality,
+                        "format": "MP4",
+                        "size": result.get("fileSize"),
+                        "hasVideo": True,
+                        "hasAudio": True,
+                        "url": result["fileUrl"],
+                    })
 
-            thumbnail = info.get("thumbnail","")
-            if not thumbnail and "youtube" in req.url:
-                thumbnail = f"https://img.youtube.com/vi/{info.get('id','')}/maxresdefault.jpg"
+            if not formats:
+                raise HTTPException(status_code=400, detail="No formats available")
 
-            return {"success":True,"title":info.get("title","Video"),"thumbnail":thumbnail,"duration":str(info.get("duration_string","N/A")),"author":info.get("uploader") or info.get("channel","Unknown"),"formats":formats}
+            return {
+                "success": True,
+                "title": oembed_data.get("title", "Video"),
+                "thumbnail": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+                "duration": "N/A",
+                "author": oembed_data.get("author_name", "YouTube"),
+                "formats": formats,
+            }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        if cookies_file and os.path.exists(cookies_file):
-            os.unlink(cookies_file)
+        raise HTTPException(status_code=500, detail=str(e))
